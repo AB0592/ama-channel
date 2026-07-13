@@ -2649,19 +2649,25 @@ function startFunasrMinnanRecognition() {
   funasrSession = { ws: ws };
 
   ws.onopen = function() {
+    // 根据当前语言模式设置 FunASR 识别语言
+    var funasrLang = '中文';  // 默认中文普通话
+    if (currentLang === 'puxianhua') funasrLang = '闽南语';  // 莆仙话用闽南语引擎识别（最接近的方言支持）
+    else if (currentLang === 'minnanhua') funasrLang = '闽南语';
+
     var config = {
       mode: '2pass',
       chunk_size: [5, 10, 5],
       chunk_interval: 10,
-      wav_name: 'ama-channel-minnan',
+      wav_name: 'ama-channel',
       is_speaking: true,
       hotwords: buildFunasrHotwords(),
-      itn: true
+      itn: true,
+      language: funasrLang
     };
-    var funasrLanguage = localStorage.getItem('funasrLanguage');
-    if (funasrLanguage) config.language = funasrLanguage;
     ws.send(JSON.stringify(config));
-    showStatus('listening', 'FunASR 已连接，正在听闽南话...');
+
+    var langLabel = currentLang === 'chinese' ? '中文' : (currentLang === 'minnanhua' ? '闽南话' : '莆仙话');
+    showStatus('listening', 'FunASR 已连接，正在听' + langLabel + '...');
 
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then(function(stream) {
@@ -2981,20 +2987,16 @@ function setupDialectDictMic(options) {
   var chineseInput = document.getElementById(options.chineseInputId);
   if (!button || !statusEl || !dialectInput) return;
 
-  var SpeechRecognition = getSpeechRecognitionCtor();
-  if (!SpeechRecognition) {
+  // 检查浏览器是否支持 WebSocket 和 getUserMedia（FunASR 依赖）
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.WebSocket) {
     button.style.opacity = '0.5';
-    button.title = '此浏览器不支持语音识别';
+    button.title = '当前浏览器不支持语音识别';
     statusEl.textContent = '当前浏览器不支持语音识别，请手动输入发音';
     return;
   }
 
-  var dictRecognition = new SpeechRecognition();
   var listening = false;
-  dictRecognition.continuous = false;
-  dictRecognition.interimResults = true;
-  dictRecognition.maxAlternatives = 3;
-  dictRecognition.lang = 'zh-CN';
+  var dictFunasrSession = null;
 
   function setListening(on) {
     listening = on;
@@ -3005,85 +3007,147 @@ function setupDialectDictMic(options) {
 
   button.addEventListener('click', function() {
     if (listening) {
-      try { dictRecognition.stop(); } catch(e) {}
+      // 停止识别
+      if (dictFunasrSession && dictFunasrSession.ws) {
+        try {
+          dictFunasrSession.ws.send(JSON.stringify({ is_speaking: false }));
+          setTimeout(function() { try { dictFunasrSession.ws.close(); } catch(e) {} }, 300);
+        } catch(e) {}
+        dictFunasrSession = null;
+      }
+      if (dictFunasrSession && dictFunasrSession.stream) {
+        dictFunasrSession.stream.getTracks().forEach(function(track) { track.stop(); });
+      }
+      if (dictFunasrSession && dictFunasrSession.audioContext) {
+        try { dictFunasrSession.audioContext.close(); } catch(e) {}
+      }
+      setListening(false);
       return;
     }
-    statusEl.textContent = '正在听您说话...';
+
+    statusEl.textContent = '正在连接语音识别...';
     statusEl.style.color = 'var(--gold)';
-    startSpeechRecognizer(dictRecognition, function() {
-      setListening(false);
-      statusEl.textContent = '语音识别启动失败，请手动输入发音';
-      statusEl.style.color = '#FF6B6B';
-    });
-  });
 
-  dictRecognition.onstart = function() {
-    activeSpeechRecognizer = dictRecognition;
-    setListening(true);
-  };
-
-  dictRecognition.onresult = function(event) {
-    var transcript = '';
-    var isFinal = false;
-    for (var i = event.resultIndex; i < event.results.length; i++) {
-      transcript += event.results[i][0].transcript;
-      if (event.results[i].isFinal) isFinal = true;
-    }
-    transcript = transcript.trim();
-    if (!transcript) return;
-
-    // Apply dialect correction
-    var corrected = transcript;
-    var translated = transcript;
+    // 根据词典类型决定识别语言
     var isPuxian = options.buttonId.indexOf('puxian') >= 0;
-    if (isPuxian && typeof translatePuxian === 'function') {
-      var pResult = translatePuxian(transcript);
-      if (pResult.changed) translated = pResult.translated;
-    } else if (!isPuxian && typeof translateMinnan === 'function') {
-      var mResult = translateMinnan(transcript);
-      if (mResult.changed) translated = mResult.translated;
+    var funasrLang = isPuxian ? '闽南语' : '闽南语';
+
+    var wsUrl = getFunasrWsUrl();
+    var ws;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch(e) {
+      statusEl.textContent = '连接语音服务失败，请手动输入发音';
+      statusEl.style.color = '#FF6B6B';
+      return;
     }
-    corrected = normalizeSpokenQuery(translated);
 
-    var pinyin = toPinyinApprox(transcript);
-    dialectInput.value = transcript;
-    statusEl.innerHTML = '识别结果：<strong>' + escapeHtml(transcript) + '</strong>' +
-      (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音近似：' + escapeHtml(pinyin) + '</span>' : '') +
-      (corrected !== transcript ? '<br><span style="font-size:0.9em;color:var(--accent-green,#2E7D32);">纠正后：' + escapeHtml(corrected) + '</span>' : '');
-    statusEl.style.color = 'var(--text,#3D2914)';
+    var finalText = '';
+    var lastText = '';
+    dictFunasrSession = { ws: ws };
 
-    if (isFinal) {
+    ws.onopen = function() {
+      var config = {
+        mode: '2pass',
+        chunk_size: [5, 10, 5],
+        chunk_interval: 10,
+        wav_name: 'ama-channel-dict',
+        is_speaking: true,
+        hotwords: buildFunasrHotwords(),
+        itn: true,
+        language: funasrLang
+      };
+      ws.send(JSON.stringify(config));
+      statusEl.textContent = '正在听您说话...';
+      statusEl.style.color = 'var(--gold)';
+      setListening(true);
+
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(function(stream) {
+          dictFunasrSession.stream = stream;
+          var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+          var audioContext = new AudioContextCtor();
+          dictFunasrSession.audioContext = audioContext;
+          var source = audioContext.createMediaStreamSource(stream);
+          var processor = audioContext.createScriptProcessor(4096, 1, 1);
+          processor.onaudioprocess = function(event) {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            var input = event.inputBuffer.getChannelData(0);
+            var pcm = floatToPcm16(downsampleTo16k(input, audioContext.sampleRate));
+            ws.send(pcm);
+          };
+          source.connect(processor);
+          processor.connect(audioContext.destination);
+        })
+        .catch(function(err) {
+          setListening(false);
+          statusEl.textContent = '无法获取麦克风，请手动输入发音';
+          statusEl.style.color = '#FF6B6B';
+        });
+    };
+
+    ws.onmessage = function(event) {
+      var data = JSON.parse(event.data);
+      var text = String(data.text || data.result || '').trim();
+      if (data.mode === '2pass-offline' || data.is_final) {
+        finalText = text;
+      }
+      if (text) {
+        lastText = text;
+        var pinyin = toPinyinApprox(text);
+        dialectInput.value = text;
+        statusEl.innerHTML = '识别中：<strong>' + escapeHtml(text) + '</strong>' +
+          (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音近似：' + escapeHtml(pinyin) + '</span>' : '');
+        statusEl.style.color = 'var(--text,#3D2914)';
+      }
+    };
+
+    ws.onclose = function() {
       setListening(false);
-      if (typeof searchOpera === 'function' && typeof operaDB !== 'undefined') {
-        // Fuzzy search: try multiple candidates
-        var matchResults = findBestVoiceMatches(transcript);
-        if (matchResults.results.length > 0) {
-          var topMatches = matchResults.results.slice(0, 3);
-          if (chineseInput) chineseInput.value = topMatches[0].title;
-          var matchList = topMatches.map(function(op) { return op.title; }).join('、');
-          statusEl.innerHTML = '识别：<strong>' + escapeHtml(transcript) + '</strong>' +
-            (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音：' + escapeHtml(pinyin) + '</span>' : '') +
-            '<br><span style="color:var(--accent-green,#2E7D32);font-weight:bold;">匹配节目（' + matchResults.results.length + '个）：' + escapeHtml(matchList) + '</span>';
-        } else {
-          statusEl.innerHTML = '识别：<strong>' + escapeHtml(transcript) + '</strong>' +
-            (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音：' + escapeHtml(pinyin) + '</span>' : '') +
-            '<br><span style="color:var(--text-muted);font-size:0.9em;">未匹配到节目，请手动填写中文名称</span>';
+      var text = (finalText || lastText || '').trim();
+      if (text) {
+        dialectInput.value = text;
+        // 应用方言纠正和匹配
+        var corrected = text;
+        var translated = text;
+        var isPuxian = options.buttonId.indexOf('puxian') >= 0;
+        if (isPuxian && typeof translatePuxian === 'function') {
+          var pResult = translatePuxian(text);
+          if (pResult.changed) translated = pResult.translated;
+        } else if (!isPuxian && typeof translateMinnan === 'function') {
+          var mResult = translateMinnan(text);
+          if (mResult.changed) translated = mResult.translated;
+        }
+        corrected = normalizeSpokenQuery(translated);
+
+        var pinyin = toPinyinApprox(text);
+        if (typeof searchOpera === 'function' && typeof operaDB !== 'undefined') {
+          var matchResults = findBestVoiceMatches(text);
+          if (matchResults.results.length > 0) {
+            var topMatches = matchResults.results.slice(0, 3);
+            if (chineseInput) chineseInput.value = topMatches[0].title;
+            var matchList = topMatches.map(function(op) { return op.title; }).join('、');
+            statusEl.innerHTML = '识别：<strong>' + escapeHtml(text) + '</strong>' +
+              (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音：' + escapeHtml(pinyin) + '</span>' : '') +
+              '<br><span style="color:var(--accent-green,#2E7D32);font-weight:bold;">匹配节目（' + matchResults.results.length + '个）：' + escapeHtml(matchList) + '</span>';
+          } else {
+            statusEl.innerHTML = '识别：<strong>' + escapeHtml(text) + '</strong>' +
+              (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音：' + escapeHtml(pinyin) + '</span>' : '') +
+              (corrected !== text ? '<br><span style="font-size:0.9em;color:var(--accent-green,#2E7D32);">纠正后：' + escapeHtml(corrected) + '</span>' : '') +
+              '<br><span style="color:var(--text-muted);font-size:0.9em;">未匹配到节目，请手动填写中文名称</span>';
+          }
         }
       }
-    }
-  };
+      dictFunasrSession = null;
+    };
 
-  dictRecognition.onend = function() {
-    if (activeSpeechRecognizer === dictRecognition) activeSpeechRecognizer = null;
-    setListening(false);
-  };
-
-  dictRecognition.onerror = function(event) {
-    if (activeSpeechRecognizer === dictRecognition) activeSpeechRecognizer = null;
-    setListening(false);
-    statusEl.textContent = getSpeechErrorMessage(event);
-    statusEl.style.color = '#FF6B6B';
-  };
+    ws.onerror = function(event) {
+      setListening(false);
+      statusEl.textContent = '语音识别连接出错，请手动输入发音';
+      statusEl.style.color = '#FF6B6B';
+      dictFunasrSession = null;
+    };
+  });
 }
 
 // =============================================
@@ -3212,19 +3276,24 @@ function searchOpera(query) {
     var title = opera.title;
     var titleLower = title.toLowerCase();
 
-    // Exact title match
+    // 精确标题匹配
     if (title === query) score += 100;
-    // Title contains query or vice versa
+    // 标题包含查询 或 查询包含标题
     else if (titleLower.includes(q) || q.includes(titleLower)) score += 50;
 
-    // LCS fuzzy match on title
+    // LCS 模糊匹配标题（阈值降低到 0.3，捕获更多语音误识别）
     var lcsLen = longestCommonSubseq(q, titleLower);
     var shorter = Math.min(q.length, titleLower.length);
-    if (shorter > 0 && lcsLen / shorter >= 0.4) {
+    if (shorter > 0 && lcsLen / shorter >= 0.3) {
       score += Math.round(lcsLen / shorter * 60);
     }
 
-    // Description keyword match
+    // 额外：编辑距离模糊匹配（针对单字差异，如"春草闯唐"vs"春草闯堂"）
+    if (shorter > 0 && lcsLen / shorter >= 0.6 && lcsLen / shorter < 1) {
+      score += 15;  // 高相似度额外加分
+    }
+
+    // 描述关键词匹配
     if (opera.description) {
       var descLower = opera.description.toLowerCase();
       if (descLower.includes(q)) score += 15;
@@ -3232,11 +3301,11 @@ function searchOpera(query) {
       if (lcsDesc >= 3) score += 10;
     }
 
-    // Category fuzzy match
+    // 分类模糊匹配
     var catLower = (opera.category || '').toLowerCase();
     if (catLower.includes(q) || q.includes(catLower)) score += 8;
 
-    // Keyword matching
+    // 关键词匹配
     (opera.keywords || []).forEach(function(kw) {
       var kwLower = kw.toLowerCase();
       if (kwLower === q) score += 40;
@@ -3245,7 +3314,8 @@ function searchOpera(query) {
       if (lcsKw >= 2) score += lcsKw * 5;
     });
 
-    if (score > 0) results.push({ opera: opera, score: score });
+    // 最低通过分数：需要一定匹配度才列入清单
+    if (score >= 15) results.push({ opera: opera, score: score });
   });
 
   results.sort(function(a, b) { return b.score - a.score; });
