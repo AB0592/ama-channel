@@ -2545,7 +2545,7 @@ function startSpeechRecognizer(recognizer, onFailure) {
   }
 }
 
-const FUNASR_DEFAULT_WS_URL = 'ws://127.0.0.1:10095';
+const FUNASR_DEFAULT_WS_URL = 'wss://www.funasr.com:10095/';
 let funasrSession = null;
 
 function getFunasrWsUrl() {
@@ -2882,44 +2882,14 @@ let _isRecording = false;
 let _recordingAutoStopTimer = null;
 
 micBtn.addEventListener('click', () => {
-  if (currentLang === 'minnanhua') {
-    startFunasrMinnanRecognition();
-    return;
-  }
-
-  if (!recognition) {
-    _voiceFallbackMode = true;
-    startRecordingMode();
-    return;
-  }
-
-  if (_isRecording) {
-    stopRecordingMode();
-    return;
-  }
-
-  if (_voiceFallbackMode) {
-    startRecordingMode();
-    return;
-  }
-
+  // 所有语言模式统一使用 FunASR（支持国内网络环境，无需 Google 服务）
   if (_isRecognizing) {
-    try { recognition.stop(); } catch(e) {}
+    if (funasrSession) {
+      stopFunasrRecognition({ autoSearch: true });
+    }
     return;
   }
-
-  // Set language based on current selection
-  if (currentLang === 'chinese') {
-    recognition.lang = 'zh-CN';
-  } else if (currentLang === 'minnanhua') {
-    recognition.lang = 'zh-CN'; // 闽南话也用中文识别引擎
-  } else {
-    recognition.lang = 'zh-CN';
-  }
-
-  startSpeechRecognizer(recognition, function() {
-    showStatus('result', '语音识别启动失败，请检查麦克风权限，或直接打字输入');
-  });
+  startFunasrMinnanRecognition();
 });
 
 function startRecordingMode() {
