@@ -3540,6 +3540,18 @@ function startSearch() {
       }
       if (sExact || sLcs >= 0.5) {
         showResult();
+        // 如果只有一个匹配结果，自动播放（语音输入场景无需二次确认）
+        if (matchResults.length === 1 && originalInput && originalInput === rawInput) {
+          setTimeout(function() {
+            const opera = currentOpera;
+            if (opera) {
+              resultSection.classList.remove('active');
+              resultSection.removeAttribute('aria-modal');
+              if (translationFlow) translationFlow.classList.remove('active');
+              startPlayback(opera);
+            }
+          }, 1500);
+        }
       } else {
         if (flowMatched) flowMatched.innerHTML = '<span class="flow-no-translate">未找到相关节目</span>';
         if (translationFlow) translationFlow.classList.remove('active');
