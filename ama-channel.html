@@ -2683,8 +2683,9 @@ function startFunasrFallback() {
   };
 
   ws.onerror = function() {
-    showStatus('result', '备用语音服务连接失败，请直接打字输入');
+    showStatus('result', '备用语音服务连接失败，正在尝试浏览器语音识别...');
     stopFunasrRecognition({ close: false });
+    setTimeout(function() { startGoogleFallback(); }, 300);
   };
 
   ws.onclose = function() {
@@ -2695,9 +2696,92 @@ function startFunasrFallback() {
       showStatus('result', '识别结果：' + escapeHtml(text));
       setTimeout(startSearch, 500);
     } else {
-      showStatus('result', '未识别到语音，请再试一次或直接打字输入');
+      showStatus('result', '备用服务未识别到结果，正在尝试浏览器语音识别...');
+      setTimeout(function() { startGoogleFallback(); }, 300);
     }
   };
+}
+
+// Google SpeechRecognition 回退函数（当讯飞和FunASR都不可用时调用）
+function startGoogleFallback() {
+  var SpeechRecognition = getSpeechRecognitionCtor();
+  if (!SpeechRecognition) {
+    showStatus('result', '浏览器语音识别不可用，请直接打字输入节目名');
+    return;
+  }
+  var googleRecog = new SpeechRecognition();
+  googleRecog.continuous = false;
+  googleRecog.interimResults = true;
+  googleRecog.maxAlternatives = 3;
+  googleRecog.lang = 'zh-CN';
+
+  _isRecognizing = true;
+  micBtn.classList.add('listening');
+  micBtn.innerHTML = '&#9724; 停止';
+  funasrSession = { ws: null, googleRecog: googleRecog }; // 复用 funasrSession 做停止控制
+  showStatus('listening', '已切换浏览器语音识别，正在听...');
+
+  activeSpeechRecognizer = googleRecog;
+
+  googleRecog.onresult = function(event) {
+    var transcript = '';
+    var isFinal = false;
+    for (var i = event.resultIndex; i < event.results.length; i++) {
+      transcript += event.results[i][0].transcript;
+      if (event.results[i].isFinal) isFinal = true;
+    }
+    transcript = transcript.trim();
+    if (!transcript) return;
+    userInput.value = transcript;
+    userInput.style.color = '';
+    showStatus('result', '浏览器识别中：' + escapeHtml(transcript));
+    if (isFinal) {
+      try { googleRecog.stop(); } catch(e) {}
+      setTimeout(startSearch, 500);
+    }
+  };
+
+  googleRecog.onstart = function() {
+    // 8秒超时自动停止
+    window._recogTimeout = setTimeout(function() {
+      try { googleRecog.stop(); } catch(e) {}
+    }, 8000);
+  };
+
+  googleRecog.onend = function() {
+    if (window._recogTimeout) clearTimeout(window._recogTimeout);
+    if (activeSpeechRecognizer === googleRecog) activeSpeechRecognizer = null;
+    _isRecognizing = false;
+    funasrSession = null;
+    micBtn.classList.remove('listening');
+    micBtn.innerHTML = '&#127908; 语音选台';
+    var text = (userInput.value || '').trim();
+    if (!text) {
+      showStatus('result', '所有语音服务均未识别到结果，请直接打字输入节目名');
+    }
+  };
+
+  googleRecog.onerror = function(event) {
+    if (window._recogTimeout) clearTimeout(window._recogTimeout);
+    if (activeSpeechRecognizer === googleRecog) activeSpeechRecognizer = null;
+    _isRecognizing = false;
+    funasrSession = null;
+    micBtn.classList.remove('listening');
+    micBtn.innerHTML = '&#127908; 语音选台';
+    var code = event && event.error ? event.error : event;
+    var msg = '所有语音服务均不可用';
+    if (code === 'no-speech') msg = '没有听到声音，请靠近麦克风再试';
+    else if (code === 'not-allowed') msg = '请允许使用麦克风权限';
+    else if (code === 'network') msg = '浏览器语音服务需要网络连接（可能需要科学上网）';
+    showStatus('result', msg + '，请直接打字输入节目名');
+  };
+
+  try { googleRecog.start(); } catch(e) {
+    _isRecognizing = false;
+    micBtn.classList.remove('listening');
+    micBtn.innerHTML = '&#127908; 语音选台';
+    showStatus('result', '浏览器语音启动失败，请直接打字输入节目名');
+  }
 }
 
 function buildFunasrHotwords() {
@@ -2753,6 +2837,7 @@ function stopFunasrRecognition(options) {
   var session = funasrSession;
   funasrSession = null;
   try {
+    if (session.googleRecog) { try { session.googleRecog.stop(); } catch(e) {} }
     if (session.processor) session.processor.disconnect();
     if (session.source) session.source.disconnect();
     if (session.stream) session.stream.getTracks().forEach(function(track) { track.stop(); });
