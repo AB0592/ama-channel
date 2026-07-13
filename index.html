@@ -2608,6 +2608,98 @@ function getFunasrWsUrl() {
   return localStorage.getItem('funasrWsUrl') || FUNASR_DEFAULT_WS_URL;
 }
 
+// FunASR 回退函数（当讯飞超限时自动调用）
+function startFunasrFallback() {
+  var wsUrl = getFunasrWsUrl();
+  var ws;
+  try {
+    ws = new WebSocket(wsUrl);
+  } catch(e) {
+    showStatus('result', '备用语音服务也连接失败，请直接打字输入');
+    return;
+  }
+
+  var finalText = '';
+  var lastText = '';
+  _isRecognizing = true;
+  micBtn.classList.add('listening');
+  micBtn.innerHTML = '&#9724; 停止';
+  funasrSession = { ws: ws };
+  showStatus('listening', '已切换备用语音服务，正在听...');
+
+  ws.onopen = function() {
+    var config = {
+      mode: '2pass',
+      chunk_size: [5, 10, 5],
+      chunk_interval: 10,
+      wav_name: 'ama-channel',
+      is_speaking: true,
+      hotwords: buildFunasrHotwords(),
+      itn: true,
+      language: '中文'
+    };
+    ws.send(JSON.stringify(config));
+
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(function(stream) {
+        if (!funasrSession || funasrSession.ws !== ws) {
+          stream.getTracks().forEach(function(track) { track.stop(); });
+          return;
+        }
+        var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        var audioContext = new AudioContextCtor();
+        var source = audioContext.createMediaStreamSource(stream);
+        var processor = audioContext.createScriptProcessor(4096, 1, 1);
+        funasrSession.stream = stream;
+        funasrSession.audioContext = audioContext;
+        funasrSession.source = source;
+        funasrSession.processor = processor;
+
+        processor.onaudioprocess = function(event) {
+          if (!funasrSession || funasrSession.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+          var input = event.inputBuffer.getChannelData(0);
+          var pcm = floatToPcm16(downsampleTo16k(input, audioContext.sampleRate));
+          ws.send(pcm);
+        };
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+      })
+      .catch(function(err) {
+        showStatus('result', '无法访问麦克风：' + escapeHtml(err.message || err));
+        stopFunasrRecognition();
+      });
+  };
+
+  ws.onmessage = function(event) {
+    var data;
+    try { data = JSON.parse(event.data); } catch(e) { return; }
+    var text = String(data.text || data.result || '').trim();
+    if (!text) return;
+    lastText = text;
+    if (data.mode === '2pass-offline' || data.is_final) finalText = text;
+    userInput.value = finalText || lastText;
+    userInput.style.color = '';
+    showStatus('result', '备用服务识别中：' + escapeHtml(userInput.value));
+  };
+
+  ws.onerror = function() {
+    showStatus('result', '备用语音服务连接失败，请直接打字输入');
+    stopFunasrRecognition({ close: false });
+  };
+
+  ws.onclose = function() {
+    var text = (finalText || lastText || userInput.value || '').trim();
+    stopFunasrRecognition({ close: false });
+    if (text) {
+      userInput.value = text;
+      showStatus('result', '识别结果：' + escapeHtml(text));
+      setTimeout(startSearch, 500);
+    } else {
+      showStatus('result', '未识别到语音，请再试一次或直接打字输入');
+    }
+  };
+}
+
 function buildFunasrHotwords() {
   var hotwords = {};
   if (typeof operaDB !== 'undefined') {
@@ -2792,13 +2884,16 @@ function startFunasrMinnanRecognition() {
       var data;
       try { data = JSON.parse(event.data); } catch(e) { return; }
       if (data.code !== 0) {
-        // 错误处理
+        // 错误处理：11200超限时自动回退FunASR
         if (data.code === 11200) {
-          showStatus('result', '语音服务调用次数超限（每日500次免费），请明天再试或直接打字输入');
+          showStatus('result', '讯飞语音服务今日额度已用完，正在切换到备用语音服务...');
+          stopFunasrRecognition();
+          // 延迟后回退到FunASR
+          setTimeout(function() { startFunasrFallback(); }, 500);
         } else {
           showStatus('result', '语音识别出错(代码:' + data.code + ')，请直接打字输入');
+          stopFunasrRecognition();
         }
-        stopFunasrRecognition();
         return;
       }
 
