@@ -1563,6 +1563,7 @@ input[type="text"], input[type="search"], textarea { font-size: clamp(22px, 5vw,
     <button class="about-btn" id="aboutBtn">&#128220; 关于这个频道</button>
     <button class="about-btn" id="puxianInputBtn">&#127908; 录入莆仙话</button>
     <button class="about-btn" id="minnanInputBtn">&#127908; 录入闽南话</button>
+    <button class="about-btn" id="voiceLibBtn">&#127908; 私人语音库</button>
   </div>
 
 </div>
@@ -3510,6 +3511,36 @@ function startSearch() {
   loadingSpinner.classList.add('active');
 
   setTimeout(() => {
+    // 优先匹配私人语音库
+    var voiceLibMatch = null;
+    if (typeof window.matchVoiceLibrary === 'function') {
+      voiceLibMatch = window.matchVoiceLibrary(rawInput);
+    }
+
+    if (voiceLibMatch && typeof window.findOperaById === 'function') {
+      var opera = window.findOperaById(voiceLibMatch.operaId);
+      if (opera) {
+        matchResults = [opera];
+        currentMatchIndex = 0;
+        currentOpera = opera;
+        if (flowMatched) {
+          flowMatched.innerHTML = '<strong>' + escapeHtml(opera.title) + '</strong>' +
+            '<br><span style="font-size:0.85em;color:var(--accent-green,#2E7D32);">&#127908; 私人语音库匹配</span>';
+        }
+        userInput.value = rawInput;
+        loadingSpinner.classList.remove('active');
+        showResult();
+        // 私人语音库单个匹配也自动播放
+        setTimeout(function() {
+          resultSection.classList.remove('active');
+          resultSection.removeAttribute('aria-modal');
+          if (translationFlow) translationFlow.classList.remove('active');
+          startPlayback(opera);
+        }, 1500);
+        return;
+      }
+    }
+
     const bestMatch = findBestVoiceMatches(rawInput);
     matchResults = bestMatch.results;
     currentMatchIndex = 0;
@@ -4455,6 +4486,329 @@ if (origTranslatePuxian) {
     return origTranslatePuxian(input);
   };
 }
+
+// ===== 私人语音库模块 =====
+(function() {
+  var voiceLibOverlay = document.getElementById('voiceLibOverlay');
+  var voiceLibBtn = document.getElementById('voiceLibBtn');
+  var voiceLibCloseBtn = document.getElementById('voiceLibCloseBtn');
+  var voiceLibOperaList = document.getElementById('voiceLibOperaList');
+  var voiceLibRecordBtn = document.getElementById('voiceLibRecordBtn');
+  var voiceLibRecordStatus = document.getElementById('voiceLibRecordStatus');
+  var voiceLibTranscriptInput = document.getElementById('voiceLibTranscriptInput');
+  var voiceLibSaveBtn = document.getElementById('voiceLibSaveBtn');
+  var voiceLibSaveStatus = document.getElementById('voiceLibSaveStatus');
+  var voiceLibCustomList = document.getElementById('voiceLibCustomList');
+  var voiceLibClearBtn = document.getElementById('voiceLibClearBtn');
+
+  var selectedOpera = null;
+  var isRecording = false;
+  var recordingSession = null;
+
+  // 从 localStorage 读取语音库
+  var voiceLibrary = JSON.parse(localStorage.getItem('amaVoiceLibrary') || '[]');
+
+  // 打开弹窗
+  voiceLibBtn.addEventListener('click', function() {
+    voiceLibOverlay.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+    renderOperaGrid();
+    renderVoiceLibList();
+  });
+
+  voiceLibCloseBtn.addEventListener('click', function() {
+    closeVoiceLib();
+  });
+
+  voiceLibOverlay.addEventListener('click', function(e) {
+    if (e.target === voiceLibOverlay) closeVoiceLib();
+  });
+
+  function closeVoiceLib() {
+    if (isRecording) stopRecording();
+    voiceLibOverlay.classList.add('hidden');
+    document.body.style.overflow = '';
+  }
+
+  // 渲染节目选择网格
+  function renderOperaGrid() {
+    voiceLibOperaList.innerHTML = '';
+    if (typeof operaDB === 'undefined') return;
+    operaDB.forEach(function(opera) {
+      if (opera.hidden) return;
+      var btn = document.createElement('button');
+      btn.textContent = opera.title;
+      btn.style.cssText = 'padding:6px 10px;border-radius:8px;border:1px solid rgba(212,168,83,0.25);' +
+        'background:rgba(255,248,232,0.8);color:#3D2914;font-size:0.85em;cursor:pointer;' +
+        'transition:all 0.2s;font-family:"Noto Serif SC",serif;text-align:center;';
+      btn.addEventListener('click', function() {
+        // 取消之前的选中
+        voiceLibOperaList.querySelectorAll('button').forEach(function(b) {
+          b.style.borderColor = 'rgba(212,168,83,0.25)';
+          b.style.background = 'rgba(255,248,232,0.8)';
+        });
+        btn.style.borderColor = 'var(--gold)';
+        btn.style.background = 'rgba(212,168,83,0.15)';
+        selectedOpera = opera;
+        voiceLibRecordBtn.disabled = false;
+        voiceLibRecordStatus.textContent = '已选择「' + opera.title + '」，点击麦克风开始录入';
+        voiceLibRecordStatus.style.color = 'var(--accent-green,#2E7D32)';
+      });
+      voiceLibOperaList.appendChild(btn);
+    });
+  }
+
+  // 录音按钮
+  voiceLibRecordBtn.addEventListener('click', function() {
+    if (!selectedOpera) return;
+    if (isRecording) {
+      stopRecording();
+      return;
+    }
+
+    isRecording = true;
+    voiceLibRecordBtn.style.background = 'var(--gold)';
+    voiceLibRecordBtn.style.color = '#fff';
+    voiceLibRecordBtn.innerHTML = '&#9724;';
+    voiceLibTranscriptInput.value = '';
+    voiceLibRecordStatus.innerHTML = '正在连接语音识别...';
+    voiceLibRecordStatus.style.color = 'var(--gold)';
+
+    // 使用科大讯飞语音识别
+    getXunfeiWsUrl().then(function(wsUrl) {
+      var ws;
+      try { ws = new WebSocket(wsUrl); } catch(e) {
+        voiceLibRecordStatus.textContent = '连接失败，请重试';
+        resetRecordBtn();
+        return;
+      }
+      recordingSession = { ws: ws };
+
+      ws.onopen = function() {
+        ws.send(JSON.stringify({
+          common: { app_id: XUNFEI_CONFIG.appId },
+          business: { language: 'zh_cn', domain: 'iat', accent: 'mandarin', ptt: 0, eos: 5000 },
+          data: { status: 0, format: 'audio/L16;rate=16000', encoding: 'raw', audio: '' }
+        }));
+        voiceLibRecordStatus.innerHTML = '&#127908; 正在听您说话，请说出「' + escapeHtml(selectedOpera.title) + '」...';
+
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+          recordingSession.stream = stream;
+          var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+          var audioContext = new AudioContextCtor();
+          var source = audioContext.createMediaStreamSource(stream);
+          var processor = audioContext.createScriptProcessor(4096, 1, 1);
+          recordingSession.audioContext = audioContext;
+          recordingSession.source = source;
+          recordingSession.processor = processor;
+          processor.onaudioprocess = function(event) {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            var input = event.inputBuffer.getChannelData(0);
+            var pcm = floatToPcm16(downsampleTo16k(input, audioContext.sampleRate));
+            var audioBase64 = arrayBufferToBase64(pcm);
+            ws.send(JSON.stringify({ data: { status: 1, format: 'audio/L16;rate=16000', encoding: 'raw', audio: audioBase64 } }));
+          };
+          source.connect(processor);
+          processor.connect(audioContext.destination);
+        }).catch(function(err) {
+          voiceLibRecordStatus.textContent = '无法获取麦克风：' + (err.message || err);
+          resetRecordBtn();
+        });
+      };
+
+      ws.onmessage = function(event) {
+        var data;
+        try { data = JSON.parse(event.data); } catch(e) { return; }
+        if (data.code !== 0) return;
+        if (data.data && data.data.result && data.data.result.ws) {
+          var text = '';
+          var wsArr = data.data.result.ws;
+          for (var i = 0; i < wsArr.length; i++) {
+            var cwArr = wsArr[i].cw;
+            for (var j = 0; j < cwArr.length; j++) text += cwArr[j].w;
+          }
+          text = text.trim();
+          if (text) {
+            voiceLibTranscriptInput.value = text;
+            voiceLibRecordStatus.innerHTML = '识别到：<strong>' + escapeHtml(text) + '</strong>';
+            voiceLibRecordStatus.style.color = 'var(--accent-green,#2E7D32)';
+          }
+        }
+      };
+
+      ws.onclose = function() {
+        var text = voiceLibTranscriptInput.value.trim();
+        resetRecordBtn();
+        if (text) {
+          voiceLibRecordStatus.innerHTML = '&#9989; 录入完成！识别结果：' + escapeHtml(text);
+          voiceLibRecordStatus.style.color = 'var(--accent-green,#2E7D32)';
+          voiceLibSaveBtn.disabled = false;
+        } else {
+          voiceLibRecordStatus.textContent = '未识别到声音，请重试';
+          voiceLibRecordStatus.style.color = '#FF6B6B';
+        }
+      };
+
+      ws.onerror = function() {
+        voiceLibRecordStatus.textContent = '语音服务连接出错';
+        voiceLibRecordStatus.style.color = '#FF6B6B';
+        resetRecordBtn();
+      };
+    }).catch(function(err) {
+      voiceLibRecordStatus.textContent = '语音服务鉴权失败';
+      voiceLibRecordStatus.style.color = '#FF6B6B';
+      resetRecordBtn();
+    });
+  });
+
+  function stopRecording() {
+    if (recordingSession) {
+      if (recordingSession.ws && recordingSession.ws.readyState === WebSocket.OPEN) {
+        recordingSession.ws.close();
+      }
+      if (recordingSession.stream) recordingSession.stream.getTracks().forEach(function(t) { t.stop(); });
+      if (recordingSession.audioContext) try { recordingSession.audioContext.close(); } catch(e) {}
+      if (recordingSession.processor) recordingSession.processor.disconnect();
+      if (recordingSession.source) recordingSession.source.disconnect();
+      recordingSession = null;
+    }
+    resetRecordBtn();
+  }
+
+  function resetRecordBtn() {
+    isRecording = false;
+    voiceLibRecordBtn.style.background = 'transparent';
+    voiceLibRecordBtn.style.color = 'var(--gold)';
+    voiceLibRecordBtn.innerHTML = '&#127908;';
+  }
+
+  // 保存到语音库
+  voiceLibSaveBtn.addEventListener('click', function() {
+    if (!selectedOpera) return;
+    var transcript = voiceLibTranscriptInput.value.trim();
+    if (!transcript) {
+      voiceLibSaveStatus.textContent = '请先录入语音';
+      voiceLibSaveStatus.style.color = '#FF6B6B';
+      return;
+    }
+
+    // 检查是否已存在该节目的录入
+    var existIdx = -1;
+    for (var i = 0; i < voiceLibrary.length; i++) {
+      if (voiceLibrary[i].operaId === selectedOpera.id) {
+        existIdx = i;
+        break;
+      }
+    }
+
+    var entry = {
+      operaId: selectedOpera.id,
+      operaTitle: selectedOpera.title,
+      transcript: transcript,
+      createdAt: new Date().toLocaleString('zh-CN')
+    };
+
+    if (existIdx >= 0) {
+      voiceLibrary[existIdx] = entry;
+      voiceLibSaveStatus.innerHTML = '&#9989; 已更新「' + escapeHtml(selectedOpera.title) + '」的语音录入';
+    } else {
+      voiceLibrary.push(entry);
+      voiceLibSaveStatus.innerHTML = '&#9989; 已保存「' + escapeHtml(selectedOpera.title) + '」的语音录入';
+    }
+    voiceLibSaveStatus.style.color = 'var(--accent-green,#2E7D32)';
+    localStorage.setItem('amaVoiceLibrary', JSON.stringify(voiceLibrary));
+
+    // 重置
+    voiceLibTranscriptInput.value = '';
+    voiceLibRecordBtn.disabled = true;
+    voiceLibSaveBtn.disabled = true;
+    selectedOpera = null;
+    voiceLibRecordStatus.textContent = '请选择一个节目开始录入';
+    voiceLibRecordStatus.style.color = 'var(--text-muted)';
+    voiceLibOperaList.querySelectorAll('button').forEach(function(b) {
+      b.style.borderColor = 'rgba(212,168,83,0.25)';
+      b.style.background = 'rgba(255,248,232,0.8)';
+    });
+
+    renderVoiceLibList();
+  });
+
+  // 渲染已录入列表
+  function renderVoiceLibList() {
+    voiceLibCustomList.innerHTML = '';
+    if (voiceLibrary.length === 0) {
+      voiceLibCustomList.innerHTML = '<div style="color:var(--text-muted);font-size:0.85em;text-align:center;">还没有录入任何语音</div>';
+      return;
+    }
+    voiceLibrary.forEach(function(entry, idx) {
+      var item = document.createElement('div');
+      item.style.cssText = 'display:flex;align-items:center;justify-content:space-between;' +
+        'padding:8px;border-radius:6px;margin-bottom:4px;background:rgba(255,248,232,0.6);' +
+        'border:1px solid rgba(212,168,83,0.1);font-size:0.85em;';
+      item.innerHTML = '<div>' +
+        '<span style="color:var(--gold);font-weight:bold;">' + escapeHtml(entry.operaTitle) + '</span>' +
+        '<br><span style="color:var(--text-muted);font-size:0.9em;">录入：' + escapeHtml(entry.transcript) +
+        ' <span style="opacity:0.6;">(' + entry.createdAt + ')</span></span></div>' +
+        '<button data-idx="' + idx + '" style="padding:4px 10px;border-radius:10px;border:1px solid rgba(255,100,100,0.3);' +
+        'background:transparent;color:#FF6B6B;font-size:0.8em;cursor:pointer;flex-shrink:0;">删除</button>';
+      item.querySelector('button').addEventListener('click', function() {
+        var i = parseInt(this.getAttribute('data-idx'));
+        voiceLibrary.splice(i, 1);
+        localStorage.setItem('amaVoiceLibrary', JSON.stringify(voiceLibrary));
+        renderVoiceLibList();
+      });
+      voiceLibCustomList.appendChild(item);
+    });
+  }
+
+  // 清空全部
+  voiceLibClearBtn.addEventListener('click', function() {
+    if (voiceLibrary.length === 0) return;
+    if (!confirm('确定要清空所有私人语音录入吗？')) return;
+    voiceLibrary = [];
+    localStorage.setItem('amaVoiceLibrary', '[]');
+    renderVoiceLibList();
+    voiceLibSaveStatus.textContent = '已清空全部语音录入';
+    voiceLibSaveStatus.style.color = 'var(--text-muted)';
+  });
+
+  // ===== 搜索时优先匹配私人语音库 =====
+  // 暴露到全局供 startSearch 调用
+  window.matchVoiceLibrary = function(rawInput) {
+    if (!rawInput || !voiceLibrary.length) return null;
+    var input = rawInput.toLowerCase().trim();
+
+    for (var i = 0; i < voiceLibrary.length; i++) {
+      var entry = voiceLibrary[i];
+      var transcript = (entry.transcript || '').toLowerCase();
+
+      // 精确匹配
+      if (input === transcript || input.includes(transcript) || transcript.includes(input)) {
+        return entry;
+      }
+
+      // LCS 模糊匹配
+      if (input.length >= 1 && transcript.length >= 1) {
+        var shorter = Math.min(input.length, transcript.length);
+        var lcsLen = longestCommonSubseq(input, transcript);
+        if (lcsLen / shorter >= 0.4) {
+          return entry;
+        }
+      }
+    }
+    return null;
+  };
+
+  // 查找节目对象
+  window.findOperaById = function(operaId) {
+    if (typeof operaDB === 'undefined') return null;
+    for (var i = 0; i < operaDB.length; i++) {
+      if (operaDB[i].id === operaId) return operaDB[i];
+    }
+    return null;
+  };
+
+})();
 </script>
 
 <!-- ===== Minnan (闽南话) Input Modal ===== -->
@@ -4491,6 +4845,68 @@ if (origTranslatePuxian) {
     </div>
 
     <button class="about-close-btn" id="minnanInputCloseBtn">关 闭</button>
+  </div>
+</div>
+
+<!-- ===== 私人语音库 Modal ===== -->
+<div class="about-modal-overlay hidden" id="voiceLibOverlay">
+  <div class="about-modal" style="max-width:600px;">
+    <h2>&#127908; 私人语音库</h2>
+    <p class="about-subtitle">让阿嬷用自己的声音录入节目名，下次语音搜索时优先匹配</p>
+
+    <!-- 录入区域 -->
+    <div style="margin-bottom:16px;">
+      <label style="color:var(--gold);font-size:0.9em;font-weight:bold;">第一步：选择要录入的节目</label>
+      <div id="voiceLibOperaList" style="margin-top:8px;max-height:180px;overflow-y:auto;
+        border:1px solid rgba(212,168,83,0.2);border-radius:8px;padding:8px;
+        display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px;">
+      </div>
+    </div>
+
+    <div style="margin-bottom:16px;">
+      <label style="color:var(--gold);font-size:0.9em;font-weight:bold;">第二步：点击麦克风，用自己的声音说出节目名</label>
+      <div style="display:flex;align-items:center;gap:12px;margin-top:10px;">
+        <button id="voiceLibRecordBtn" style="width:56px;height:56px;border-radius:50%;
+          border:2px solid var(--gold);background:transparent;color:var(--gold);font-size:1.5em;
+          cursor:pointer;transition:all 0.3s;flex-shrink:0;" disabled>&#127908;</button>
+        <div id="voiceLibRecordStatus" style="flex:1;color:var(--text-muted);font-size:0.9em;">
+          请先选择一个节目
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-bottom:16px;">
+      <label style="color:var(--gold);font-size:0.9em;font-weight:bold;">识别到的文字（可修改）：</label>
+      <input type="text" id="voiceLibTranscriptInput" placeholder="语音识别结果将显示在这里"
+        style="width:100%;padding:10px;border-radius:8px;border:1px solid rgba(212,168,83,0.3);
+        background:rgba(255,248,232,0.9);color:#2A1A0E;font-size:1em;margin-top:6px;
+        font-family:'Noto Serif SC',serif;box-sizing:border-box;" />
+    </div>
+
+    <div style="display:flex;gap:10px;justify-content:center;">
+      <button id="voiceLibSaveBtn" style="padding:10px 28px;border-radius:20px;
+        border:2px solid var(--gold);background:linear-gradient(135deg,var(--gold),#C49A3A);
+        color:var(--bg-dark);font-size:0.95em;font-weight:700;cursor:pointer;transition:all 0.3s;"
+        disabled>保存到语音库</button>
+    </div>
+
+    <div id="voiceLibSaveStatus" style="text-align:center;margin-top:10px;font-size:0.9em;min-height:1.5em;"></div>
+
+    <!-- 已录入列表 -->
+    <div style="margin-top:20px;border-top:1px solid rgba(212,168,83,0.15);padding-top:16px;">
+      <label style="color:var(--gold);font-size:0.9em;font-weight:bold;">已录入的私人语音（保存在本地浏览器中）：</label>
+      <div id="voiceLibCustomList" style="max-height:200px;overflow-y:auto;margin-top:8px;
+        border:1px solid rgba(212,168,83,0.15);border-radius:8px;padding:8px;">
+        <div style="color:var(--text-muted);font-size:0.85em;text-align:center;">还没有录入任何语音</div>
+      </div>
+      <div style="text-align:center;margin-top:8px;">
+        <button id="voiceLibClearBtn" style="padding:6px 16px;border-radius:15px;
+          border:1px solid rgba(255,100,100,0.3);background:transparent;color:#FF6B6B;
+          font-size:0.8em;cursor:pointer;transition:all 0.3s;">清空全部</button>
+      </div>
+    </div>
+
+    <button class="about-close-btn" id="voiceLibCloseBtn">关 闭</button>
   </div>
 </div>
 
