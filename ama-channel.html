@@ -1453,6 +1453,9 @@ input[type="text"], input[type="search"], textarea { font-size: clamp(22px, 5vw,
       </button>
       <button class="search-btn" id="searchBtn">点播</button>
       <button class="voice-browse-btn" id="voiceBrowseBtn">&#127911; 语音选台</button>
+      <button class="voice-browse-btn" id="voiceSaveBtn" title="语音录入并保存到私人语音库" style="background:rgba(212,168,83,0.15);border-color:var(--gold);">
+        &#127908; 录入
+      </button>
     </div>
     <div class="recognition-status" id="recogStatus">
       <span class="status-dot" id="statusDot"></span>
@@ -3195,6 +3198,134 @@ micBtn.addEventListener('click', () => {
   }
   startFunasrMinnanRecognition();
 });
+
+// ===== 搜索栏"🎤 录入"按钮：语音录入并保存到私人语音库 =====
+var voiceSaveBtn = document.getElementById('voiceSaveBtn');
+if (voiceSaveBtn) {
+  voiceSaveBtn.addEventListener('click', function() {
+    if (_isRecognizing) {
+      showStatus('result', '正在识别中，请稍候...');
+      return;
+    }
+    startVoiceSaveRecognition();
+  });
+}
+
+function startVoiceSaveRecognition() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.WebSocket) {
+    showStatus('result', '当前浏览器不支持语音识别，请使用 Chrome / Edge');
+    return;
+  }
+
+  var finalText = '';
+  var lastText = '';
+  _isRecognizing = true;
+  voiceSaveBtn.classList.add('listening');
+  voiceSaveBtn.innerHTML = '&#9724; 录入中';
+  showStatus('listening', '正在连接语音识别，请说出节目名...');
+
+  getXunfeiWsUrl().then(function(wsUrl) {
+    var ws;
+    try { ws = new WebSocket(wsUrl); } catch(e) {
+      showStatus('result', '语音服务连接失败');
+      resetVoiceSaveBtn();
+      return;
+    }
+
+    funasrSession = { ws: ws };
+
+    ws.onopen = function() {
+      ws.send(JSON.stringify({
+        common: { app_id: XUNFEI_CONFIG.appId },
+        business: { language: 'zh_cn', domain: 'iat', accent: 'mandarin', ptt: 0, eos: 5000 },
+        data: { status: 0, format: 'audio/L16;rate=16000', encoding: 'raw', audio: '' }
+      }));
+      showStatus('listening', '&#127908; 请说出节目名...');
+
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+        if (!funasrSession || funasrSession.ws !== ws) { stream.getTracks().forEach(function(t){t.stop();}); return; }
+        var AC = window.AudioContext || window.webkitAudioContext;
+        var ac = new AC(), src = ac.createMediaStreamSource(stream), proc = ac.createScriptProcessor(4096,1,1);
+        funasrSession.stream = stream; funasrSession.audioContext = ac; funasrSession.source = src; funasrSession.processor = proc;
+        proc.onaudioprocess = function(e) {
+          if (!funasrSession || funasrSession.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+          var pcm = floatToPcm16(downsampleTo16k(e.inputBuffer.getChannelData(0), ac.sampleRate));
+          ws.send(JSON.stringify({ data: { status: 1, format: 'audio/L16;rate=16000', encoding: 'raw', audio: arrayBufferToBase64(pcm) } }));
+        };
+        src.connect(proc); proc.connect(ac.destination);
+      }).catch(function(err) {
+        showStatus('result', '无法访问麦克风：' + escapeHtml(err.message||err));
+        resetVoiceSaveBtn();
+      });
+    };
+
+    ws.onmessage = function(event) {
+      var d; try { d = JSON.parse(event.data); } catch(e){ return; }
+      if (d.code !== 0) return;
+      if (d.data && d.data.result && d.data.result.ws) {
+        var t = ''; d.data.result.ws.forEach(function(w){ w.cw.forEach(function(c){ t += c.w; }); });
+        t = t.trim();
+        if (t) { lastText = t; if (d.data.status === 2) finalText = t; userInput.value = finalText || lastText; showStatus('result', '识别中：' + escapeHtml(userInput.value)); }
+      }
+    };
+
+    ws.onclose = function() {
+      var text = (finalText || lastText || userInput.value || '').trim();
+      stopFunasrRecognition({ close: false });
+      resetVoiceSaveBtn();
+      if (text) {
+        userInput.value = text;
+        showStatus('result', '识别结果：' + escapeHtml(text) + '，正在匹配节目...');
+        // 延迟后执行搜索和保存流程
+        setTimeout(function() { doVoiceSaveSearch(text); }, 300);
+      } else {
+        showStatus('result', '未识别到语音，请再试一次');
+      }
+    };
+
+    ws.onerror = function() {
+      showStatus('result', '语音服务连接失败');
+      stopFunasrRecognition({ close: false });
+      resetVoiceSaveBtn();
+    };
+  }).catch(function(err) {
+    showStatus('result', '语音服务鉴权失败：' + escapeHtml(err.message||err));
+    resetVoiceSaveBtn();
+  });
+}
+
+function resetVoiceSaveBtn() {
+  _isRecognizing = false;
+  voiceSaveBtn.classList.remove('listening');
+  voiceSaveBtn.innerHTML = '&#127908; 录入';
+}
+
+// 语音识别后搜索节目并提示保存到私人语音库
+function doVoiceSaveSearch(query) {
+  var matchResults = findBestVoiceMatches(query);
+  if (!matchResults.results || matchResults.results.length === 0) {
+    showStatus('result', '未匹配到节目「' + escapeHtml(query) + '」，请尝试其他说法，或去底部"私人语音库"手动录入');
+    return;
+  }
+
+  var opera = matchResults.results[0];
+  var confirmed = confirm('识别到「' + query + '」，匹配到节目《' + opera.title + '》\n\n是否保存到私人语音库？');
+  if (confirmed) {
+    // 保存到私人语音库
+    var voiceLibrary = JSON.parse(localStorage.getItem('amaVoiceLibrary') || '[]');
+    var existIdx = -1;
+    for (var i = 0; i < voiceLibrary.length; i++) { if (voiceLibrary[i].operaId === opera.id) { existIdx = i; break; } }
+    var entry = { operaId: opera.id, operaTitle: opera.title, transcript: query, createdAt: new Date().toLocaleString('zh-CN') };
+    if (existIdx >= 0) { voiceLibrary[existIdx] = entry; }
+    else { voiceLibrary.push(entry); }
+    localStorage.setItem('amaVoiceLibrary', JSON.stringify(voiceLibrary));
+    showStatus('result', '&#9989; 已保存「' + escapeHtml(opera.title) + '」到私人语音库');
+    // 自动播放
+    setTimeout(function() { startPlayback(opera); }, 800);
+  } else {
+    showStatus('result', '已取消保存，匹配到《' + escapeHtml(opera.title) + '》');
+  }
+}
 
 function startRecordingMode() {
   if (_isRecording) return;
