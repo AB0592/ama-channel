@@ -955,11 +955,12 @@
     .header h1 { font-size: 1.7em; letter-spacing: 1px; }
     .header .subtitle { font-size: 0.82em; }
     .voice-section { padding: 0; }
-    .input-area { flex-direction: row; gap: 3px; padding: 5px; }
-    .text-input { width: auto; min-height: 40px; font-size: 0.96em; padding: 8px 6px; }
-    .mic-btn { width: 40px; height: 40px; font-size: 18px; align-self: center; }
-    .search-btn { width: auto; min-height: 40px; padding: 0 10px; font-size: 0.88em; }
-    .voice-browse-btn { width: auto; min-height: 40px; padding: 0 9px; font-size: 0.88em; }
+    .input-area { flex-wrap: wrap; gap: 6px; padding: 6px; }
+    .text-input { width: 100%; min-height: 44px; font-size: 1em; padding: 10px 12px; order: 0; }
+    .mic-btn { width: 44px; height: 44px; font-size: 20px; order: 1; }
+    .search-btn { flex: 1; min-height: 44px; padding: 0 10px; font-size: 0.95em; order: 2; }
+    .voice-browse-btn { flex: 1; min-height: 44px; padding: 0 8px; font-size: 0.85em; order: 3; }
+    .voice-save-btn { flex: 1; min-height: 44px; padding: 0 8px; font-size: 0.85em; order: 4; }
     .lang-btn { padding: 0 11px; min-height: 30px; font-size: 0.82em; }
     .gallery-nav { margin-top: 6px; }
     .gallery-nav h2 { font-size: 0.95em; margin-bottom: 6px; }
@@ -986,11 +987,6 @@
   /* ===== Responsive ===== */
   @media (max-width: 600px) {
     .header h1 { font-size: 1.45em; letter-spacing: 1px; }
-    .input-area { flex-wrap: nowrap; }
-    .text-input { width: auto; }
-    .search-btn { width: auto; }
-    .mic-btn { margin: 0 auto; }
-    .gallery-grid { grid-template-columns: 1fr; }
     .result-poster { width: 100%; height: 160px; }
   }
 
@@ -1453,7 +1449,7 @@ input[type="text"], input[type="search"], textarea { font-size: clamp(22px, 5vw,
       </button>
       <button class="search-btn" id="searchBtn">点播</button>
       <button class="voice-browse-btn" id="voiceBrowseBtn">&#127911; 语音选台</button>
-      <button class="voice-browse-btn" id="voiceSaveBtn" title="语音录入并保存到私人语音库" style="background:rgba(212,168,83,0.15);border-color:var(--gold);">
+      <button class="voice-browse-btn voice-save-btn" id="voiceSaveBtn" title="语音录入并保存到私人语音库" style="background:rgba(212,168,83,0.15);border-color:var(--gold);">
         &#127908; 录入
       </button>
     </div>
@@ -2854,6 +2850,16 @@ function stopFunasrRecognition(options) {
   _isRecognizing = false;
   micBtn.classList.remove('listening');
   micBtn.innerHTML = '&#127908;<span class="ripple"></span>';
+
+  // 用户手动点击停止时，立即用当前输入内容触发搜索
+  if (options.autoSearch) {
+    var text = (userInput.value || '').trim();
+    if (text) {
+      session._searchHandled = true;
+      showStatus('result', '识别结果：' + escapeHtml(text));
+      setTimeout(startSearch, 400);
+    }
+  }
 }
 
 function startFunasrMinnanRecognition() {
@@ -3017,6 +3023,7 @@ function startFunasrMinnanRecognition() {
     ws.onclose = function() {
       var text = (finalText || lastText || userInput.value || '').trim();
       stopFunasrRecognition({ close: false });
+      if (session._searchHandled) return;
       if (text) {
         userInput.value = text;
         showStatus('result', '识别结果：' + escapeHtml(text));
@@ -3039,16 +3046,9 @@ function startFunasrMinnanRecognition() {
 function initSpeechRecognition() {
   const SpeechRecognition = getSpeechRecognitionCtor();
   if (!SpeechRecognition) {
-    micBtn.title = '当前浏览器不支持语音识别，点击将播放推荐节目';
-    langHint.textContent = '语音不可用，点击麦克风播放推荐';
-    micBtn.addEventListener('click', function playDefault() {
-      var defaultOpera = operaDB.find(function(o) { return o.title === '春草闯堂'; });
-      if (defaultOpera) {
-        showStatus('result', '语音识别不可用，已为您播放《春草闯堂》。');
-        currentOpera = defaultOpera;
-        startPlayback(defaultOpera);
-      }
-    }, { once: true });
+    micBtn.title = '点击使用语音搜索节目';
+    langHint.textContent = '可直接说普通话搜索节目';
+    // 不再添加降级监听器，全局已有科大讯飞语音识别监听器
     return;
   }
 
@@ -3187,9 +3187,14 @@ let _testTimeout = null;
 let _isRecognizing = false;
 let _isRecording = false;
 let _recordingAutoStopTimer = null;
+let _saveRecognizing = false;
+let _saveSession = null;
 
 micBtn.addEventListener('click', () => {
-  // 所有语言模式统一使用 FunASR（支持国内网络环境，无需 Google 服务）
+  if (_saveRecognizing) {
+    showStatus('result', '录入功能正在使用中，请先停止');
+    return;
+  }
   if (_isRecognizing) {
     if (funasrSession) {
       stopFunasrRecognition({ autoSearch: true });
@@ -3203,8 +3208,12 @@ micBtn.addEventListener('click', () => {
 var voiceSaveBtn = document.getElementById('voiceSaveBtn');
 if (voiceSaveBtn) {
   voiceSaveBtn.addEventListener('click', function() {
+    if (_saveRecognizing) {
+      stopSaveRecognition();
+      return;
+    }
     if (_isRecognizing) {
-      showStatus('result', '正在识别中，请稍候...');
+      showStatus('result', '麦克风正在使用中，请先停止');
       return;
     }
     startVoiceSaveRecognition();
@@ -3219,7 +3228,7 @@ function startVoiceSaveRecognition() {
 
   var finalText = '';
   var lastText = '';
-  _isRecognizing = true;
+  _saveRecognizing = true;
   voiceSaveBtn.classList.add('listening');
   voiceSaveBtn.innerHTML = '&#9724; 录入中';
   showStatus('listening', '正在连接语音识别，请说出节目名...');
@@ -3232,7 +3241,7 @@ function startVoiceSaveRecognition() {
       return;
     }
 
-    funasrSession = { ws: ws };
+    _saveSession = { ws: ws };
 
     ws.onopen = function() {
       ws.send(JSON.stringify({
@@ -3243,19 +3252,19 @@ function startVoiceSaveRecognition() {
       showStatus('listening', '&#127908; 请说出节目名...');
 
       navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
-        if (!funasrSession || funasrSession.ws !== ws) { stream.getTracks().forEach(function(t){t.stop();}); return; }
+        if (!_saveSession || _saveSession.ws !== ws) { stream.getTracks().forEach(function(t){t.stop();}); return; }
         var AC = window.AudioContext || window.webkitAudioContext;
         var ac = new AC(), src = ac.createMediaStreamSource(stream), proc = ac.createScriptProcessor(4096,1,1);
-        funasrSession.stream = stream; funasrSession.audioContext = ac; funasrSession.source = src; funasrSession.processor = proc;
+        _saveSession.stream = stream; _saveSession.audioContext = ac; _saveSession.source = src; _saveSession.processor = proc;
         proc.onaudioprocess = function(e) {
-          if (!funasrSession || funasrSession.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+          if (!_saveSession || _saveSession.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
           var pcm = floatToPcm16(downsampleTo16k(e.inputBuffer.getChannelData(0), ac.sampleRate));
           ws.send(JSON.stringify({ data: { status: 1, format: 'audio/L16;rate=16000', encoding: 'raw', audio: arrayBufferToBase64(pcm) } }));
         };
         src.connect(proc); proc.connect(ac.destination);
       }).catch(function(err) {
         showStatus('result', '无法访问麦克风：' + escapeHtml(err.message||err));
-        resetVoiceSaveBtn();
+        stopSaveRecognition();
       });
     };
 
@@ -3271,12 +3280,10 @@ function startVoiceSaveRecognition() {
 
     ws.onclose = function() {
       var text = (finalText || lastText || userInput.value || '').trim();
-      stopFunasrRecognition({ close: false });
-      resetVoiceSaveBtn();
+      stopSaveRecognition();
       if (text) {
         userInput.value = text;
         showStatus('result', '识别结果：' + escapeHtml(text) + '，正在匹配节目...');
-        // 延迟后执行搜索和保存流程
         setTimeout(function() { doVoiceSaveSearch(text); }, 300);
       } else {
         showStatus('result', '未识别到语音，请再试一次');
@@ -3285,17 +3292,24 @@ function startVoiceSaveRecognition() {
 
     ws.onerror = function() {
       showStatus('result', '语音服务连接失败');
-      stopFunasrRecognition({ close: false });
-      resetVoiceSaveBtn();
+      stopSaveRecognition();
     };
   }).catch(function(err) {
     showStatus('result', '语音服务鉴权失败：' + escapeHtml(err.message||err));
-    resetVoiceSaveBtn();
+    stopSaveRecognition();
   });
 }
 
-function resetVoiceSaveBtn() {
-  _isRecognizing = false;
+function stopSaveRecognition() {
+  if (_saveSession) {
+    try { if (_saveSession.ws && _saveSession.ws.readyState === WebSocket.OPEN) _saveSession.ws.close(); } catch(e) {}
+    try { if (_saveSession.stream) _saveSession.stream.getTracks().forEach(function(t){t.stop();}); } catch(e) {}
+    try { if (_saveSession.audioContext) _saveSession.audioContext.close(); } catch(e) {}
+    try { if (_saveSession.processor) _saveSession.processor.disconnect(); } catch(e) {}
+    try { if (_saveSession.source) _saveSession.source.disconnect(); } catch(e) {}
+    _saveSession = null;
+  }
+  _saveRecognizing = false;
   voiceSaveBtn.classList.remove('listening');
   voiceSaveBtn.innerHTML = '&#127908; 录入';
 }
