@@ -1561,7 +1561,6 @@ input[type="text"], input[type="search"], textarea { font-size: clamp(22px, 5vw,
     <button class="about-btn" id="aboutBtn">&#128220; 关于这个频道</button>
     <button class="about-btn" id="puxianInputBtn">&#127908; 录入莆仙话</button>
     <button class="about-btn" id="minnanInputBtn">&#127908; 录入闽南话</button>
-    <button class="about-btn" id="voiceLibBtn">&#127908; 私人语音库</button>
   </div>
 
 </div>
@@ -3333,8 +3332,6 @@ function setupDialectDictMic(options) {
 
   var listening = false;
   var dictSession = null;
-  var isPuxian = options.buttonId.indexOf('puxian') >= 0;
-  var currentStep = 0; // 0=idle, 1=google, 2=funasr, 3=iflytek
 
   function setListening(on) {
     listening = on;
@@ -3343,274 +3340,89 @@ function setupDialectDictMic(options) {
     button.style.color = on ? '#fff' : 'var(--gold)';
   }
 
-  function cleanupDictSession() {
-    if (dictSession) {
-      try { if (dictSession.googleRecog) { try { dictSession.googleRecog.stop(); } catch(e) {} } } catch(e) {}
-      try { if (dictSession.ws && dictSession.ws.readyState === WebSocket.OPEN) dictSession.ws.close(); } catch(e) {}
-      try { if (dictSession.stream) dictSession.stream.getTracks().forEach(function(t){t.stop();}); } catch(e) {}
-      try { if (dictSession.audioContext) dictSession.audioContext.close(); } catch(e) {}
-      try { if (dictSession.processor) dictSession.processor.disconnect(); } catch(e) {}
-      try { if (dictSession.source) dictSession.source.disconnect(); } catch(e) {}
+  button.addEventListener('click', function() {
+    if (listening) {
+      if (dictSession && dictSession.ws) {
+        try { dictSession.ws.close(); } catch(e) {}
+      }
+      if (dictSession && dictSession.stream) {
+        dictSession.stream.getTracks().forEach(function(track) { track.stop(); });
+      }
+      if (dictSession && dictSession.audioContext) {
+        try { dictSession.audioContext.close(); } catch(e) {}
+      }
       dictSession = null;
-    }
-    setListening(false);
-  }
-
-  // 录入完成后的统一匹配回调
-  function onDictRecognized(text) {
-    cleanupDictSession();
-    currentStep = 0;
-    if (!text) return;
-
-    dialectInput.value = text;
-    var pinyin = toPinyinApprox(text);
-    var translated = text;
-    var changed = false;
-
-    // 共享搜索栏的词库：先翻译方言
-    if (isPuxian && typeof translatePuxian === 'function') {
-      var pResult = translatePuxian(text);
-      if (pResult.changed) { translated = pResult.translated; changed = true; }
-    } else if (!isPuxian && typeof translateMinnan === 'function') {
-      var mResult = translateMinnan(text);
-      if (mResult.changed) { translated = mResult.translated; changed = true; }
-    }
-
-    // 共享搜索栏的匹配算法：使用 findBestVoiceMatches
-    var matchResults = findBestVoiceMatches(text);
-    if (matchResults.results.length > 0) {
-      var topMatches = matchResults.results.slice(0, 3);
-      if (chineseInput) chineseInput.value = topMatches[0].title;
-      var matchList = topMatches.map(function(op) { return op.title; }).join('、');
-      statusEl.innerHTML = '识别：<strong>' + escapeHtml(text) + '</strong>' +
-        (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音：' + escapeHtml(pinyin) + '</span>' : '') +
-        (changed ? '<br><span style="font-size:0.9em;color:var(--accent-green,#2E7D32);">方言翻译：' + escapeHtml(translated) + '</span>' : '') +
-        '<br><span style="color:var(--accent-green,#2E7D32);font-weight:bold;">匹配节目（' + matchResults.results.length + '个）：' + escapeHtml(matchList) + '</span>';
-    } else {
-      statusEl.innerHTML = '识别：<strong>' + escapeHtml(text) + '</strong>' +
-        (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音：' + escapeHtml(pinyin) + '</span>' : '') +
-        (changed ? '<br><span style="font-size:0.9em;color:var(--accent-green,#2E7D32);">方言翻译：' + escapeHtml(translated) + '</span>' : '') +
-        '<br><span style="color:var(--text-muted);font-size:0.9em;">未匹配到节目，请手动填写中文名称</span>';
-    }
-    statusEl.style.color = 'var(--text,#3D2914)';
-  }
-
-  // 第1步：Google SpeechRecognition（浏览器内置）
-  function tryGoogle() {
-    var SpeechRecognition = getSpeechRecognitionCtor();
-    if (!SpeechRecognition) {
-      statusEl.textContent = '浏览器语音不可用，正在尝试在线语音服务...';
-      currentStep = 2;
-      setTimeout(tryFunasr, 300);
+      setListening(false);
       return;
     }
 
-    var googleRecog = new SpeechRecognition();
-    googleRecog.continuous = false;
-    googleRecog.interimResults = true;
-    googleRecog.maxAlternatives = 3;
-    googleRecog.lang = 'zh-CN';
-    dictSession = { googleRecog: googleRecog, ws: null };
-    currentStep = 1;
-
-    statusEl.textContent = '正在使用浏览器语音识别，请说话...';
+    statusEl.textContent = '正在连接语音识别...';
     statusEl.style.color = 'var(--gold)';
-    setListening(true);
 
-    googleRecog.onresult = function(event) {
-      var transcript = '';
-      var isFinal = false;
-      for (var i = event.resultIndex; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript;
-        if (event.results[i].isFinal) isFinal = true;
-      }
-      transcript = transcript.trim();
-      if (!transcript) return;
-      dialectInput.value = transcript;
-      statusEl.innerHTML = '浏览器识别中：<strong>' + escapeHtml(transcript) + '</strong>';
-      statusEl.style.color = 'var(--text,#3D2914)';
-      if (isFinal) {
-        onDictRecognized(transcript);
-      }
-    };
+    var isPuxian = options.buttonId.indexOf('puxian') >= 0;
 
-    googleRecog.onstart = function() {
-      setTimeout(function() { try { googleRecog.stop(); } catch(e) {} }, 8000);
-    };
-
-    googleRecog.onend = function() {
-      if (currentStep !== 1) return; // 已切换到其他服务
-      var text = (dialectInput.value || '').trim();
-      if (!text) {
-        statusEl.textContent = '浏览器未识别到结果，正在尝试在线语音服务...';
-        currentStep = 2;
-        setTimeout(tryFunasr, 300);
-      }
-    };
-
-    googleRecog.onerror = function(event) {
-      if (currentStep !== 1) return;
-      var code = event && event.error ? event.error : event;
-      if (code === 'aborted') return;
-      var msg = '浏览器语音不可用';
-      if (code === 'no-speech') msg = '没有听到声音';
-      else if (code === 'not-allowed') msg = '请允许使用麦克风权限';
-      else if (code === 'audio-capture') msg = '找不到麦克风';
-      statusEl.textContent = msg + '，正在尝试在线语音服务...';
-      currentStep = 2;
-      setTimeout(tryFunasr, 300);
-    };
-
-    try { googleRecog.start(); } catch(e) {
-      currentStep = 2;
-      setTimeout(tryFunasr, 300);
-    }
-  }
-
-  // 第2步：FunASR 公共服务（国内可用）
-  function tryFunasr() {
-    var wsUrl = getFunasrWsUrl();
-    var ws;
-    try { ws = new WebSocket(wsUrl); } catch(e) {
-      statusEl.textContent = '在线服务连接失败，正在尝试讯飞语音...';
-      currentStep = 3;
-      setTimeout(tryXunfei, 300);
-      return;
-    }
-
-    var finalText = '', lastText = '';
-    dictSession = { ws: ws, googleRecog: null };
-    currentStep = 2;
-    statusEl.textContent = '正在使用在线语音服务，请说话...';
-    statusEl.style.color = 'var(--gold)';
-    setListening(true);
-
-    ws.onopen = function() {
-      ws.send(JSON.stringify({
-        mode: '2pass', chunk_size: [5, 10, 5], chunk_interval: 10,
-        wav_name: 'ama-channel-dict', is_speaking: true,
-        hotwords: buildFunasrHotwords(), itn: true, language: '中文'
-      }));
-
-      navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
-        if (currentStep !== 2) { stream.getTracks().forEach(function(t){t.stop();}); return; }
-        var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-        var audioContext = new AudioContextCtor();
-        var source = audioContext.createMediaStreamSource(stream);
-        var processor = audioContext.createScriptProcessor(4096, 1, 1);
-        dictSession.stream = stream; dictSession.audioContext = audioContext;
-        dictSession.source = source; dictSession.processor = processor;
-        processor.onaudioprocess = function(event) {
-          if (currentStep !== 2 || !dictSession || dictSession.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
-          var input = event.inputBuffer.getChannelData(0);
-          var pcm = floatToPcm16(downsampleTo16k(input, audioContext.sampleRate));
-          ws.send(pcm);
-        };
-        source.connect(processor); processor.connect(audioContext.destination);
-      }).catch(function(err) {
-        cleanupDictSession(); currentStep = 0;
-        statusEl.textContent = '无法获取麦克风，请手动输入发音';
-        statusEl.style.color = '#FF6B6B';
-      });
-    };
-
-    ws.onmessage = function(event) {
-      if (currentStep !== 2) return;
-      var data; try { data = JSON.parse(event.data); } catch(e) { return; }
-      var text = String(data.text || data.result || '').trim();
-      if (!text) return;
-      lastText = text;
-      if (data.mode === '2pass-offline' || data.is_final) finalText = text;
-      dialectInput.value = finalText || lastText;
-      statusEl.innerHTML = '在线服务识别中：<strong>' + escapeHtml(dialectInput.value) + '</strong>';
-      statusEl.style.color = 'var(--text,#3D2914)';
-    };
-
-    ws.onerror = function() {
-      if (currentStep !== 2) return;
-      statusEl.textContent = '在线服务连接失败，正在尝试讯飞语音...';
-      cleanupDictSession();
-      currentStep = 3;
-      setTimeout(tryXunfei, 300);
-    };
-
-    ws.onclose = function() {
-      if (currentStep !== 2) return;
-      var text = (finalText || lastText || dialectInput.value || '').trim();
-      if (text) {
-        onDictRecognized(text);
-      } else {
-        statusEl.textContent = '在线服务未识别到结果，正在尝试讯飞语音...';
-        cleanupDictSession();
-        currentStep = 3;
-        setTimeout(tryXunfei, 300);
-      }
-    };
-  }
-
-  // 第3步：科大讯飞 iFlytek（方言免切，最后兜底）
-  function tryXunfei() {
+    // 使用科大讯飞语音听写 API
     getXunfeiWsUrl().then(function(wsUrl) {
       var ws;
       try { ws = new WebSocket(wsUrl); } catch(e) {
-        statusEl.textContent = '讯飞语音也连接失败，请手动输入发音';
+        statusEl.textContent = '连接语音服务失败，请手动输入发音';
         statusEl.style.color = '#FF6B6B';
-        currentStep = 0;
         return;
       }
 
-      var finalText = '', lastText = '';
-      dictSession = { ws: ws, googleRecog: null };
-      currentStep = 3;
-      statusEl.textContent = '正在使用讯飞语音识别，请说话...';
-      statusEl.style.color = 'var(--gold)';
-      setListening(true);
+      var finalText = '';
+      var lastText = '';
+      dictSession = { ws: ws };
 
       ws.onopen = function() {
-        var xunfeiDomain = 'xfime-mianqie';
-        ws.send(JSON.stringify({
+        var xunfeiDomain = 'xfime-mianqie'; // 方言免切模式
+        var params = {
           common: { app_id: XUNFEI_CONFIG.appId },
-          business: { language: 'zh_cn', domain: xunfeiDomain, accent: 'mandarin', ptt: 0, eos: 5000 },
+          business: {
+            language: 'zh_cn',
+            domain: xunfeiDomain,
+            accent: 'mandarin',
+            ptt: 0,
+            eos: 5000
+          },
           data: { status: 0, format: 'audio/L16;rate=16000', encoding: 'raw', audio: '' }
-        }));
+        };
+        ws.send(JSON.stringify(params));
+        statusEl.textContent = '正在听您说话...';
+        statusEl.style.color = 'var(--gold)';
+        setListening(true);
 
-        navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
-          if (currentStep !== 3 || !dictSession || dictSession.ws !== ws) {
-            stream.getTracks().forEach(function(t){t.stop();}); return;
-          }
-          var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-          var audioContext = new AudioContextCtor();
-          var source = audioContext.createMediaStreamSource(stream);
-          var processor = audioContext.createScriptProcessor(4096, 1, 1);
-          dictSession.stream = stream; dictSession.audioContext = audioContext;
-          dictSession.source = source; dictSession.processor = processor;
-          processor.onaudioprocess = function(event) {
-            if (currentStep !== 3 || !dictSession || dictSession.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
-            var input = event.inputBuffer.getChannelData(0);
-            var pcm = floatToPcm16(downsampleTo16k(input, audioContext.sampleRate));
-            ws.send(JSON.stringify({
-              data: { status: 1, format: 'audio/L16;rate=16000', encoding: 'raw', audio: arrayBufferToBase64(pcm) }
-            }));
-          };
-          source.connect(processor); processor.connect(audioContext.destination);
-        }).catch(function(err) {
-          cleanupDictSession(); currentStep = 0;
-          statusEl.textContent = '无法获取麦克风，请手动输入发音';
-          statusEl.style.color = '#FF6B6B';
-        });
+        navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(function(stream) {
+            dictSession.stream = stream;
+            var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+            var audioContext = new AudioContextCtor();
+            dictSession.audioContext = audioContext;
+            var source = audioContext.createMediaStreamSource(stream);
+            var processor = audioContext.createScriptProcessor(4096, 1, 1);
+            processor.onaudioprocess = function(event) {
+              if (ws.readyState !== WebSocket.OPEN) return;
+              var input = event.inputBuffer.getChannelData(0);
+              var pcm = floatToPcm16(downsampleTo16k(input, audioContext.sampleRate));
+              var audioBase64 = arrayBufferToBase64(pcm);
+              ws.send(JSON.stringify({
+                data: { status: 1, format: 'audio/L16;rate=16000', encoding: 'raw', audio: audioBase64 }
+              }));
+            };
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+          })
+          .catch(function(err) {
+            setListening(false);
+            statusEl.textContent = '无法获取麦克风，请手动输入发音';
+            statusEl.style.color = '#FF6B6B';
+          });
       };
 
       ws.onmessage = function(event) {
-        if (currentStep !== 3) return;
-        var data; try { data = JSON.parse(event.data); } catch(e) { return; }
-        if (data.code !== 0) {
-          if (data.code === 11200) {
-            statusEl.textContent = '讯飞语音今日额度已用完，请手动输入发音';
-            statusEl.style.color = '#FF6B6B';
-            cleanupDictSession(); currentStep = 0;
-          }
-          return;
-        }
+        var data;
+        try { data = JSON.parse(event.data); } catch(e) { return; }
+        if (data.code !== 0) { return; }
         if (data.data && data.data.result && data.data.result.ws) {
           var text = '';
           var wsArray = data.data.result.ws;
@@ -3622,49 +3434,61 @@ function setupDialectDictMic(options) {
           if (text) {
             lastText = text;
             if (data.data.status === 2) finalText = text;
-            dialectInput.value = finalText || lastText;
-            statusEl.innerHTML = '讯飞识别中：<strong>' + escapeHtml(dialectInput.value) + '</strong>';
+            var pinyin = toPinyinApprox(text);
+            dialectInput.value = text;
+            statusEl.innerHTML = '识别中：<strong>' + escapeHtml(text) + '</strong>' +
+              (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音近似：' + escapeHtml(pinyin) + '</span>' : '');
             statusEl.style.color = 'var(--text,#3D2914)';
           }
         }
       };
 
       ws.onclose = function() {
-        if (currentStep !== 3) return;
-        var text = (finalText || lastText || dialectInput.value || '').trim();
+        setListening(false);
+        var text = (finalText || lastText || '').trim();
         if (text) {
-          onDictRecognized(text);
-        } else {
-          statusEl.textContent = '所有语音服务均未识别到结果，请手动输入发音';
-          statusEl.style.color = '#FF6B6B';
-          cleanupDictSession(); currentStep = 0;
+          dialectInput.value = text;
+          var corrected = text;
+          var translated = text;
+          if (isPuxian && typeof translatePuxian === 'function') {
+            var pResult = translatePuxian(text);
+            if (pResult.changed) translated = pResult.translated;
+          } else if (!isPuxian && typeof translateMinnan === 'function') {
+            var mResult = translateMinnan(text);
+            if (mResult.changed) translated = mResult.translated;
+          }
+          corrected = normalizeSpokenQuery(translated);
+          var pinyin = toPinyinApprox(text);
+          if (typeof searchOpera === 'function' && typeof operaDB !== 'undefined') {
+            var matchResults = findBestVoiceMatches(text);
+            if (matchResults.results.length > 0) {
+              var topMatches = matchResults.results.slice(0, 3);
+              if (chineseInput) chineseInput.value = topMatches[0].title;
+              var matchList = topMatches.map(function(op) { return op.title; }).join('、');
+              statusEl.innerHTML = '识别：<strong>' + escapeHtml(text) + '</strong>' +
+                (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音：' + escapeHtml(pinyin) + '</span>' : '') +
+                '<br><span style="color:var(--accent-green,#2E7D32);font-weight:bold;">匹配节目（' + matchResults.results.length + '个）：' + escapeHtml(matchList) + '</span>';
+            } else {
+              statusEl.innerHTML = '识别：<strong>' + escapeHtml(text) + '</strong>' +
+                (pinyin ? '<br><span style="font-size:0.9em;color:var(--text-muted);">拼音：' + escapeHtml(pinyin) + '</span>' : '') +
+                (corrected !== text ? '<br><span style="font-size:0.9em;color:var(--accent-green,#2E7D32);">纠正后：' + escapeHtml(corrected) + '</span>' : '') +
+                '<br><span style="color:var(--text-muted);font-size:0.9em;">未匹配到节目，请手动填写中文名称</span>';
+            }
+          }
         }
+        dictSession = null;
       };
 
       ws.onerror = function() {
-        if (currentStep !== 3) return;
-        statusEl.textContent = '讯飞语音连接失败，请手动输入发音';
+        setListening(false);
+        statusEl.textContent = '语音识别连接出错，请手动输入发音';
         statusEl.style.color = '#FF6B6B';
-        cleanupDictSession(); currentStep = 0;
+        dictSession = null;
       };
     }).catch(function(err) {
-      statusEl.textContent = '讯飞语音鉴权失败，请手动输入发音';
+      statusEl.textContent = '语音服务鉴权失败，请手动输入发音';
       statusEl.style.color = '#FF6B6B';
-      currentStep = 0;
     });
-  }
-
-  // 按钮点击：启动共享回退链 Google → FunASR → iFlytek
-  button.addEventListener('click', function() {
-    if (listening) {
-      cleanupDictSession();
-      currentStep = 0;
-      return;
-    }
-    statusEl.textContent = '正在连接语音识别...';
-    statusEl.style.color = 'var(--gold)';
-    // 第1步：先尝试浏览器内置语音
-    tryGoogle();
   });
 }
 
