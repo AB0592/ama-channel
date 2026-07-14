@@ -2677,9 +2677,8 @@ function startFunasrFallback() {
   };
 
   ws.onerror = function() {
-    showStatus('result', '备用语音服务连接失败，正在尝试讯飞语音服务...');
+    showStatus('result', '备用语音服务连接失败，请直接打字输入节目名');
     stopFunasrRecognition({ close: false });
-    setTimeout(function() { startFunasrMinnanRecognition(); }, 300);
   };
 
   ws.onclose = function() {
@@ -2690,8 +2689,7 @@ function startFunasrFallback() {
       showStatus('result', '识别结果：' + escapeHtml(text));
       setTimeout(startSearch, 500);
     } else {
-      showStatus('result', '备用服务未识别到结果，正在尝试讯飞语音服务...');
-      setTimeout(function() { startFunasrMinnanRecognition(); }, 300);
+      showStatus('result', '备用服务未识别到结果，请直接打字输入节目名');
     }
   };
 }
@@ -2700,8 +2698,8 @@ function startFunasrFallback() {
 function startGoogleFallback() {
   var SpeechRecognition = getSpeechRecognitionCtor();
   if (!SpeechRecognition) {
-    showStatus('result', '浏览器语音识别不可用，正在尝试在线语音服务...');
-    setTimeout(function() { startFunasrFallback(); }, 300);
+    showStatus('result', '浏览器语音识别不可用，正在尝试讯飞语音...');
+    setTimeout(function() { startFunasrMinnanRecognition(); }, 300);
     return;
   }
   var googleRecog = new SpeechRecognition();
@@ -2753,8 +2751,8 @@ function startGoogleFallback() {
     micBtn.innerHTML = '&#127908; 语音选台';
     var text = (userInput.value || '').trim();
     if (!text) {
-      showStatus('result', '浏览器语音识别未识别到结果，正在尝试在线语音服务...');
-      setTimeout(function() { startFunasrFallback(); }, 300);
+      showStatus('result', '浏览器语音识别未识别到结果，正在尝试讯飞语音...');
+      setTimeout(function() { startFunasrMinnanRecognition(); }, 300);
     }
   };
 
@@ -2777,8 +2775,8 @@ function startGoogleFallback() {
     else if (code === 'not-allowed') msg = '请允许使用麦克风权限';
     else if (code === 'audio-capture') msg = '找不到麦克风，请检查设备';
     else if (code === 'network') msg = '浏览器语音服务需要网络连接';
-    showStatus('result', msg + '，正在尝试在线语音服务...');
-    setTimeout(function() { startFunasrFallback(); }, 300);
+    showStatus('result', msg + '，正在尝试讯飞语音...');
+    setTimeout(function() { startFunasrMinnanRecognition(); }, 300);
   };
 
   try { googleRecog.start(); } catch(e) {
@@ -2786,13 +2784,13 @@ function startGoogleFallback() {
     funasrSession = null;
     micBtn.classList.remove('listening');
     micBtn.innerHTML = '&#127908; 语音选台';
-    showStatus('result', '浏览器语音启动失败，正在尝试在线语音服务...');
-    setTimeout(function() { startFunasrFallback(); }, 300);
+    showStatus('result', '浏览器语音启动失败，正在尝试讯飞语音...');
+    setTimeout(function() { startFunasrMinnanRecognition(); }, 300);
   }
 }
 
 // =============================================
-// 语音回退链主入口：Google → FunASR → iFlytek → 提示打字
+// 语音回退链主入口：Google → 科大讯飞 → FunASR → 提示打字
 // =============================================
 function startVoiceRecognition() {
   if (funasrSession) {
@@ -2808,8 +2806,8 @@ function startVoiceRecognition() {
   if (SpeechRecognition) {
     startGoogleFallback();
   } else {
-    showStatus('result', '浏览器语音识别不可用，正在尝试在线语音服务...');
-    setTimeout(function() { startFunasrFallback(); }, 300);
+    showStatus('result', '浏览器语音识别不可用，正在尝试讯飞语音...');
+    setTimeout(function() { startFunasrMinnanRecognition(); }, 300);
   }
 }
 
@@ -3008,10 +3006,11 @@ function startFunasrMinnanRecognition() {
       var data;
       try { data = JSON.parse(event.data); } catch(e) { return; }
       if (data.code !== 0) {
-        // 错误处理：11200超限时提示用户打字输入
+        // 错误处理：11200超限时回退到 FunASR
         if (data.code === 11200) {
-          showStatus('result', '讯飞语音服务今日额度已用完，请直接打字输入节目名');
-          stopFunasrRecognition();
+          showStatus('result', '讯飞语音服务今日额度已用完，正在尝试备用语音服务...');
+          stopFunasrRecognition({ close: false });
+          setTimeout(function() { startFunasrFallback(); }, 300);
         } else {
           showStatus('result', '语音识别出错(代码:' + data.code + ')，请直接打字输入');
           stopFunasrRecognition();
